@@ -537,6 +537,9 @@ function render(){
 
 function renderAdminControl(){
   const control = document.getElementById('admin-control');
+  const mode = isAdmin() ? 'admin' : 'login';
+  if(control.dataset.mode === mode) return;
+  control.dataset.mode = mode;
   control.innerHTML = '';
   const form = document.createElement('form');
   form.className = 'admin-control';
@@ -582,6 +585,7 @@ function renderAdminControl(){
           ? 'Brak konfiguracji ADMIN_PASSWORD'
           : (error.error || 'Nieprawidłowe hasło');
         login.disabled = false;
+        input.focus();
       }
     };
   }
