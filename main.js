@@ -5,7 +5,6 @@ const ADMIN_TOKEN_KEY = 'elo-arena-admin-token';
 const TABS = [
   {id:'queue', label:'Kolejka'},
   {id:'leaderboard', label:'Ranking'},
-  {id:'stats', label:'Statystyki'},
   {id:'players', label:'Gracze'},
   {id:'history', label:'Historia'},
   {id:'settings', label:'Ustawienia'},
@@ -14,7 +13,7 @@ const TABS = [
 let state = defaultState();
 let activeTab = 'queue';
 let saving = false;
-let resolveFlow = null; // { winner, rows, status, progress, imageObjectUrl, uploadBlob }
+let resolveFlow = null; // { winner, mvpId, aceId }
 
 function adminToken(){
   return sessionStorage.getItem(ADMIN_TOKEN_KEY) || '';
@@ -205,202 +204,28 @@ window.addEventListener('storage', (e) => {
   }
 });
 
-// ---------- screenshot OCR ----------
-const SCREENSHOT_API = '/.netlify/functions/screenshot';
-const KDA_RE = /(\d{1,2})\s*\/\s*(\d{1,2})\s*\/\s*(\d{1,2})/;
-
-function loadTesseract(){
-  if(window.Tesseract) return Promise.resolve(window.Tesseract);
-  if(window.__tesseractLoading) return window.__tesseractLoading;
-  window.__tesseractLoading = new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
-    script.onload = () => resolve(window.Tesseract);
-    script.onerror = () => reject(new Error('Nie udało się wczytać biblioteki OCR'));
-    document.head.appendChild(script);
-  });
-  return window.__tesseractLoading;
-}
-
-function resizeImageBlob(file, maxWidth){
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      const scale = Math.min(1, maxWidth / img.width);
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.round(img.width * scale));
-      canvas.height = Math.max(1, Math.round(img.height * scale));
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      URL.revokeObjectURL(url);
-      canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Konwersja obrazu nie powiodła się')), 'image/png');
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Nie udało się wczytać obrazu')); };
-    img.src = url;
-  });
-}
-
-function parseOcrRows(rawText){
-  const lines = (rawText || '').split('\n').map(l => l.trim()).filter(Boolean);
-  const rows = [];
-  lines.forEach(line => {
-    const m = line.match(KDA_RE);
-    if(!m) return;
-    const nameGuess = line.slice(0, m.index).replace(/[^\p{L}\p{N}\s._-]/gu, '').trim();
-    rows.push({
-      raw: line,
-      nameGuess,
-      kills: Number(m[1]),
-      deaths: Number(m[2]),
-      assists: Number(m[3])
-    });
-  });
-  return rows;
-}
-
-function levenshtein(a, b){
-  const m = a.length, n = b.length;
-  const dp = Array.from({length: m + 1}, () => new Array(n + 1).fill(0));
-  for(let i = 0; i <= m; i++) dp[i][0] = i;
-  for(let j = 0; j <= n; j++) dp[0][j] = j;
-  for(let i = 1; i <= m; i++){
-    for(let j = 1; j <= n; j++){
-      dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] : 1 + Math.min(dp[i-1][j-1], dp[i-1][j], dp[i][j-1]);
-    }
-  }
-  return dp[m][n];
-}
-
-function nameSimilarity(a, b){
-  a = (a || '').toLowerCase().trim();
-  b = (b || '').toLowerCase().trim();
-  if(!a || !b) return 0;
-  if(a === b) return 1;
-  if(a.includes(b) || b.includes(a)) return 0.8;
-  const at = new Set(a.split(/\s+/));
-  const bt = new Set(b.split(/\s+/));
-  let common = 0;
-  at.forEach(t => { if(t.length > 1 && bt.has(t)) common++; });
-  if(common) return Math.min(0.95, 0.5 + 0.15 * common);
-  const maxLen = Math.max(a.length, b.length) || 1;
-  return 1 - levenshtein(a, b) / maxLen;
-}
-
-function matchOcrToRows(ocrRows){
-  if(!resolveFlow) return;
-  const combos = [];
-  resolveFlow.rows.forEach((row, ri) => {
-    ocrRows.forEach((orow, oi) => {
-      combos.push({ ri, oi, score: nameSimilarity(row.name, orow.nameGuess) });
-    });
-  });
-  combos.sort((a, b) => b.score - a.score);
-  const rowUsed = new Set(), ocrUsed = new Set();
-  combos.forEach(c => {
-    if(c.score < 0.3) return;
-    if(rowUsed.has(c.ri) || ocrUsed.has(c.oi)) return;
-    rowUsed.add(c.ri); ocrUsed.add(c.oi);
-    const row = resolveFlow.rows[c.ri];
-    const orow = ocrRows[c.oi];
-    row.kills = orow.kills;
-    row.deaths = orow.deaths;
-    row.assists = orow.assists;
-  });
-}
-
-async function handleScreenshotFile(file){
-  if(!resolveFlow) return;
-  if(resolveFlow.imageObjectUrl) URL.revokeObjectURL(resolveFlow.imageObjectUrl);
-  resolveFlow.status = 'processing';
-  resolveFlow.progress = null;
-  render();
-  try{
-    const resized = await resizeImageBlob(file, 1600);
-    if(!resolveFlow) return;
-    resolveFlow.uploadBlob = resized;
-    resolveFlow.imageObjectUrl = URL.createObjectURL(resized);
-    render();
-
-    const Tesseract = await loadTesseract();
-    const worker = await Tesseract.createWorker('eng', 1, {
-      logger: m => {
-        if(!resolveFlow) return;
-        const prevPct = resolveFlow.progress ? Math.round((resolveFlow.progress.progress || 0) * 100) : -1;
-        const pct = Math.round((m.progress || 0) * 100);
-        if(pct === prevPct && resolveFlow.progress && resolveFlow.progress.status === m.status) return;
-        resolveFlow.progress = m;
-        render();
-      }
-    });
-    const { data } = await worker.recognize(resized);
-    await worker.terminate();
-    if(!resolveFlow) return;
-
-    const ocrRows = parseOcrRows(data.text || '');
-    matchOcrToRows(ocrRows);
-    resolveFlow.status = ocrRows.length ? 'done' : 'empty';
-  }catch(e){
-    console.error('Błąd OCR', e);
-    if(resolveFlow) resolveFlow.status = 'error';
-  }
-  render();
-}
-
-async function uploadScreenshot(key, blob){
-  const res = await apiFetch(`${SCREENSHOT_API}?key=${encodeURIComponent(key)}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': blob.type || 'image/png' },
-    body: blob
-  });
-  if(!res.ok) throw new Error(`HTTP ${res.status}`);
-}
-
-function initResolveRows(){
-  const ids = [...state.pending.teamA, ...state.pending.teamB];
-  return ids.map(id => ({ id, name: findPlayer(id)?.name || '?', kills: 0, deaths: 0, assists: 0 }));
-}
-
 function startResolveFlow(winner){
-  resolveFlow = { winner, rows: initResolveRows(), status: 'idle', progress: null, imageObjectUrl: null, uploadBlob: null };
+  resolveFlow = { winner, mvpId: '', aceId: '' };
   render();
 }
 
 function cancelResolveFlow(){
-  if(resolveFlow?.imageObjectUrl) URL.revokeObjectURL(resolveFlow.imageObjectUrl);
   resolveFlow = null;
   render();
 }
 
-async function confirmResolveWithStats(){
+function confirmResolve(){
   if(!resolveFlow) return;
   const winner = resolveFlow.winner;
-  const matchId = uid();
-  let screenshotKey = null;
-  if(resolveFlow.uploadBlob){
-    try{
-      await uploadScreenshot(matchId, resolveFlow.uploadBlob);
-      screenshotKey = matchId;
-    }catch(e){
-      console.error('Nie udało się zapisać screena', e);
-      alert('Nie udało się zapisać screena — wynik meczu i statystyki zostaną zapisane bez niego.');
-    }
+  if(!resolveFlow.mvpId || !resolveFlow.aceId){
+    alert('Wybierz MVP z wygranej drużyny i ACE z przegranej.');
+    return;
   }
-  const statsByPlayer = {};
-  resolveFlow.rows.forEach(r => {
-    statsByPlayer[r.id] = { kills: r.kills, deaths: r.deaths, assists: r.assists };
-  });
-  if(resolveFlow.imageObjectUrl) URL.revokeObjectURL(resolveFlow.imageObjectUrl);
+  if(resolveFlow.mvpId === resolveFlow.aceId) return;
+  const mvpId = resolveFlow.mvpId;
+  const aceId = resolveFlow.aceId;
   resolveFlow = null;
-  resolveMatch(winner, statsByPlayer, screenshotKey, matchId);
-}
-
-function confirmResolveWithoutStats(){
-  if(!resolveFlow) return;
-  const winner = resolveFlow.winner;
-  if(resolveFlow.imageObjectUrl) URL.revokeObjectURL(resolveFlow.imageObjectUrl);
-  resolveFlow = null;
-  resolveMatch(winner);
+  resolveMatch(winner, mvpId, aceId);
 }
 
 // ---------- elo math ----------
@@ -553,31 +378,9 @@ function cancelPendingMatch(){
   saveState();
 }
 
-const PERF_SCALE = 3;
-const PERF_CAP = 8;
+const MVP_BONUS = 5;
 
-function kdaRatioOf(p){
-  return ((p.kills || 0) + (p.assists || 0)) / Math.max(1, p.deaths || 0);
-}
-
-// Mały bonus/malus do ELO za KDA względem średniej drużyny (max ±PERF_CAP).
-function performanceModifiers(ids, statsByPlayer){
-  const ratios = ids.map(id => {
-    const s = statsByPlayer[id];
-    if(!s) return null;
-    return { id, r: (s.kills + s.assists) / Math.max(1, s.deaths) };
-  }).filter(Boolean);
-  if(ratios.length === 0) return {};
-  const avgR = ratios.reduce((sum, x) => sum + x.r, 0) / ratios.length;
-  const mods = {};
-  ratios.forEach(x => {
-    const mod = Math.max(-PERF_CAP, Math.min(PERF_CAP, Math.round((x.r - avgR) * PERF_SCALE)));
-    mods[x.id] = mod;
-  });
-  return mods;
-}
-
-function resolveMatch(winner, statsByPlayer, screenshotKey, matchId){
+function resolveMatch(winner, mvpId, aceId){
   if(!isAdmin()) return;
   const { teamA, teamB, avgA, avgB } = state.pending;
   const playerSnapshots = {};
@@ -611,10 +414,10 @@ function resolveMatch(winner, statsByPlayer, screenshotKey, matchId){
 
   const playerDeltas = {};
   const applyTeam = (ids, baseDelta, won) => {
-    const mods = statsByPlayer ? performanceModifiers(ids, statsByPlayer) : {};
     ids.forEach(id => {
-      const total = baseDelta + (mods[id] || 0);
-      applyResult(id, total, won, statsByPlayer ? statsByPlayer[id] : null);
+      const bonus = id === mvpId ? MVP_BONUS : (id === aceId ? MVP_BONUS : 0);
+      const total = baseDelta + bonus;
+      applyResult(id, total, won);
       playerDeltas[id] = total;
     });
   };
@@ -630,24 +433,18 @@ function resolveMatch(winner, statsByPlayer, screenshotKey, matchId){
     winner, deltaA, deltaB,
     playerDeltas,
     playerSnapshots,
-    stats: statsByPlayer || null,
-    screenshotKey: screenshotKey || null
+    mvpId,
+    aceId
   });
   state.pending = null;
   saveState();
 }
 
-function applyResult(id, delta, won, stats){
+function applyResult(id, delta, won){
   const p = findPlayer(id);
   if(!p) return;
   p.elo += delta;
   p.games += 1;
-  if(stats){
-    p.kills = (p.kills || 0) + (stats.kills || 0);
-    p.deaths = (p.deaths || 0) + (stats.deaths || 0);
-    p.assists = (p.assists || 0) + (stats.assists || 0);
-    p.statGames = (p.statGames || 0) + 1;
-  }
   if(won){
     p.wins += 1;
     p.streak = p.streak > 0 ? p.streak + 1 : 1;
@@ -733,7 +530,6 @@ function render(){
   el.innerHTML = '';
   if(activeTab === 'queue') el.appendChild(renderQueueTab());
   else if(activeTab === 'leaderboard') el.appendChild(renderLeaderboardTab());
-  else if(activeTab === 'stats') el.appendChild(renderStatsTab());
   else if(activeTab === 'players') el.appendChild(renderPlayersTab());
   else if(activeTab === 'history') el.appendChild(renderHistoryTab());
   else if(activeTab === 'settings') el.appendChild(renderSettingsTab());
@@ -816,22 +612,6 @@ function panel(title){
   return d;
 }
 
-document.addEventListener('paste', (e) => {
-  if(!resolveFlow || resolveFlow.status === 'processing') return;
-  const items = e.clipboardData?.items;
-  if(!items) return;
-  for(const item of items){
-    if(item.type && item.type.startsWith('image/')){
-      const file = item.getAsFile();
-      if(file){
-        e.preventDefault();
-        handleScreenshotFile(file);
-      }
-      break;
-    }
-  }
-});
-
 function renderResolveFlow(){
   const wrap = document.createElement('div');
   wrap.className = 'resolve-flow';
@@ -841,7 +621,7 @@ function renderResolveFlow(){
   header.style.marginBottom = '10px';
   const title = document.createElement('div');
   title.className = 'muted';
-  title.textContent = `Zwycięzca: Drużyna ${resolveFlow.winner} — wklej screena z wynikami (opcjonalnie)`;
+  title.textContent = `Zwycięzca: Drużyna ${resolveFlow.winner}`;
   const cancel = document.createElement('button');
   cancel.className = 'btn secondary';
   cancel.style.padding = '5px 10px';
@@ -852,88 +632,37 @@ function renderResolveFlow(){
   header.appendChild(cancel);
   wrap.appendChild(header);
 
-  const zone = document.createElement('div');
-  zone.className = 'paste-zone';
-  zone.tabIndex = 0;
-  zone.textContent = resolveFlow.imageObjectUrl
-    ? 'Kliknij tutaj i wklej (Ctrl+V), żeby podmienić screena'
-    : 'Kliknij tutaj i wklej screena (Ctrl+V) — albo wybierz plik poniżej';
-  wrap.appendChild(zone);
-
-  const fileRow = document.createElement('div');
-  fileRow.className = 'row';
-  fileRow.style.margin = '8px 0';
-  const fileInput = document.createElement('input');
-  fileInput.type = 'file';
-  fileInput.accept = 'image/*';
-  fileInput.onchange = () => { if(fileInput.files[0]) handleScreenshotFile(fileInput.files[0]); };
-  fileRow.appendChild(fileInput);
-  wrap.appendChild(fileRow);
-
-  if(resolveFlow.imageObjectUrl){
-    const img = document.createElement('img');
-    img.src = resolveFlow.imageObjectUrl;
-    img.className = 'screenshot-thumb';
-    wrap.appendChild(img);
-  }
-
-  const status = document.createElement('div');
-  status.className = 'muted ocr-progress';
-  status.style.margin = '10px 0';
-  if(resolveFlow.status === 'processing'){
-    const pct = resolveFlow.progress ? Math.round((resolveFlow.progress.progress || 0) * 100) : 0;
-    const label = resolveFlow.progress?.status === 'recognizing text' ? 'Rozpoznawanie tekstu' : 'Wczytywanie OCR';
-    status.textContent = `${label}… ${pct}%`;
-  }else if(resolveFlow.status === 'done'){
-    status.textContent = 'Rozpoznano dane ze screena — sprawdź i popraw liczby poniżej przed zapisem.';
-  }else if(resolveFlow.status === 'empty'){
-    status.textContent = 'Nie udało się automatycznie rozpoznać wierszy K/D/A — wpisz dane ręcznie poniżej.';
-  }else if(resolveFlow.status === 'error'){
-    status.textContent = 'Błąd rozpoznawania — wpisz dane ręcznie poniżej.';
-  }else{
-    status.textContent = 'Statystyki K/D/A możesz też wpisać ręcznie, bez wklejania screena.';
-  }
-  wrap.appendChild(status);
-
-  const table = document.createElement('table');
-  table.className = 'resolve-table';
-  table.innerHTML = `<thead><tr><th>Gracz</th><th>K</th><th>D</th><th>A</th></tr></thead>`;
-  const tbody = document.createElement('tbody');
-  resolveFlow.rows.forEach(row => {
-    const tr = document.createElement('tr');
-    const tdName = document.createElement('td');
-    tdName.textContent = row.name;
-    tr.appendChild(tdName);
-    ['kills','deaths','assists'].forEach(field => {
-      const td = document.createElement('td');
-      const inp = document.createElement('input');
-      inp.type = 'number';
-      inp.min = '0';
-      inp.value = row[field];
-      inp.oninput = () => { row[field] = Number(inp.value) || 0; };
-      td.appendChild(inp);
-      tr.appendChild(td);
-    });
-    tbody.appendChild(tr);
-  });
-  table.appendChild(tbody);
-  wrap.appendChild(table);
+  const winnerIds = state.pending[resolveFlow.winner === 'A' ? 'teamA' : 'teamB'];
+  const loserIds = state.pending[resolveFlow.winner === 'A' ? 'teamB' : 'teamA'];
+  const selectPlayer = (label, ids, property) => {
+    const field = document.createElement('label');
+    field.className = 'form-row';
+    field.textContent = label;
+    const select = document.createElement('select');
+    select.innerHTML = '<option value="">Wybierz gracza…</option>' + ids.map(id => {
+      const player = findPlayer(id);
+      return `<option value="${id}">${player ? player.name : '?'}</option>`;
+    }).join('');
+    select.value = resolveFlow[property];
+    select.onchange = () => {
+      resolveFlow[property] = select.value;
+      render();
+    };
+    field.appendChild(select);
+    wrap.appendChild(field);
+  };
+  selectPlayer('MVP wygranej drużyny (+5 ELO)', winnerIds, 'mvpId');
+  selectPlayer('ACE przegranej drużyny (traci 5 ELO mniej)', loserIds, 'aceId');
 
   const actions = document.createElement('div');
   actions.className = 'row';
   actions.style.marginTop = '14px';
-  const saveWithStats = document.createElement('button');
-  saveWithStats.className = 'btn';
-  saveWithStats.style.flex = '1';
-  saveWithStats.textContent = 'Zapisz wynik ze statystykami';
-  saveWithStats.onclick = () => confirmResolveWithStats();
-  const saveWithout = document.createElement('button');
-  saveWithout.className = 'btn secondary';
-  saveWithout.style.flex = '1';
-  saveWithout.textContent = 'Zapisz bez statystyk';
-  saveWithout.onclick = () => confirmResolveWithoutStats();
-  actions.appendChild(saveWithStats);
-  actions.appendChild(saveWithout);
+  const save = document.createElement('button');
+  save.className = 'btn';
+  save.style.flex = '1';
+  save.textContent = 'Zapisz wynik';
+  save.onclick = () => confirmResolve();
+  actions.appendChild(save);
   wrap.appendChild(actions);
 
   return wrap;
@@ -1120,94 +849,6 @@ function renderLeaderboardTab(){
   return frag;
 }
 
-function renderStatsTab(){
-  const frag = document.createDocumentFragment();
-
-  const p1 = panel('Statystyki graczy');
-  const withStats = state.players.filter(pl => (pl.statGames || 0) > 0);
-  if(withStats.length === 0){
-    const e = document.createElement('div');
-    e.className = 'empty-state';
-    e.textContent = 'Brak jeszcze statystyk K/D/A — dodaj je przy rozstrzyganiu meczu (wklejając screena lub wpisując ręcznie).';
-    p1.appendChild(e);
-  }else{
-    const sorted = [...withStats].sort((a,b) => kdaRatioOf(b) - kdaRatioOf(a));
-    const table = document.createElement('table');
-    table.innerHTML = `<thead><tr><th>Gracz</th><th>KDA</th><th>K</th><th>D</th><th>A</th><th>Mecze ze staty.</th></tr></thead>`;
-    const tbody = document.createElement('tbody');
-    sorted.forEach(pl => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${pl.name}</td>
-        <td class="elo-val">${kdaRatioOf(pl).toFixed(2)}</td>
-        <td>${pl.kills || 0}</td><td>${pl.deaths || 0}</td><td>${pl.assists || 0}</td>
-        <td>${pl.statGames || 0}</td>`;
-      tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    p1.appendChild(table);
-  }
-  frag.appendChild(p1);
-
-  const p2 = panel('Screeny z meczów');
-  const withData = state.matches.filter(m => m.stats || m.screenshotKey);
-  if(withData.length === 0){
-    const e = document.createElement('div');
-    e.className = 'empty-state';
-    e.textContent = 'Żaden mecz nie ma jeszcze zapisanego screena ani statystyk.';
-    p2.appendChild(e);
-  }else{
-    withData.forEach(m => {
-      const row = document.createElement('div');
-      row.className = 'match-row';
-      const date = new Date(m.date);
-      const dateStr = date.toLocaleDateString('pl-PL') + ' ' + date.toLocaleTimeString('pl-PL', {hour:'2-digit',minute:'2-digit'});
-      const top = document.createElement('div');
-      top.className = 'match-top';
-      top.innerHTML = `<span>${dateStr}</span><span>Zwycięstwo: Drużyna ${m.winner}</span>`;
-      row.appendChild(top);
-
-      if(m.screenshotKey){
-        const link = document.createElement('a');
-        link.href = `${SCREENSHOT_API}?key=${encodeURIComponent(m.screenshotKey)}`;
-        link.target = '_blank';
-        link.rel = 'noopener';
-        const img = document.createElement('img');
-        img.src = link.href;
-        img.className = 'screenshot-thumb';
-        img.loading = 'lazy';
-        link.appendChild(img);
-        row.appendChild(link);
-      }
-
-      if(m.stats){
-        const table = document.createElement('table');
-        table.style.marginTop = '8px';
-        table.innerHTML = `<thead><tr><th>Gracz</th><th>K</th><th>D</th><th>A</th><th>Δ ELO</th></tr></thead>`;
-        const tbody = document.createElement('tbody');
-        [...m.teamA, ...m.teamB].forEach(id => {
-          const pl = findPlayer(id);
-          const s = m.stats[id];
-          const delta = m.playerDeltas ? m.playerDeltas[id] : null;
-          const deltaTxt = delta == null ? '—' : (delta >= 0 ? `+${delta}` : delta);
-          const deltaClass = delta == null ? '' : (delta >= 0 ? 'delta-pos' : 'delta-neg');
-          const tr = document.createElement('tr');
-          tr.innerHTML = `<td>${pl ? pl.name : '(usunięty)'}</td>
-            <td>${s ? s.kills : '—'}</td><td>${s ? s.deaths : '—'}</td><td>${s ? s.assists : '—'}</td>
-            <td class="${deltaClass}">${deltaTxt}</td>`;
-          tbody.appendChild(tr);
-        });
-        table.appendChild(tbody);
-        row.appendChild(table);
-      }
-
-      p2.appendChild(row);
-    });
-  }
-  frag.appendChild(p2);
-
-  return frag;
-}
-
 function renderPlayersTab(){
   const frag = document.createDocumentFragment();
   const p = panel('Gracze');
@@ -1321,6 +962,15 @@ function renderHistoryTab(){
         teamsDiv.appendChild(div);
       });
       row.appendChild(teamsDiv);
+      if(m.mvpId || m.aceId){
+        const awards = document.createElement('div');
+        awards.className = 'muted';
+        awards.style.marginTop = '8px';
+        const mvpName = m.mvpId ? findPlayer(m.mvpId)?.name || '(usunięty)' : '—';
+        const aceName = m.aceId ? findPlayer(m.aceId)?.name || '(usunięty)' : '—';
+        awards.textContent = `MVP: ${mvpName} (+${MVP_BONUS}) · ACE: ${aceName} (+${MVP_BONUS} względem standardowej straty)`;
+        row.appendChild(awards);
+      }
       p.appendChild(row);
     });
   }
