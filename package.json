@@ -1,7 +1,4 @@
 {
   "private": true,
-  "type": "module",
-  "dependencies": {
-    "@netlify/blobs": "latest"
-  }
+  "type": "module"
 }

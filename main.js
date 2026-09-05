@@ -1,6 +1,6 @@
 const STORAGE_KEY = 'elo-arena-state-v1';
 const SEED_KEY = 'elo-arena-seed-imported-v2';
-const STATE_API = '/.netlify/functions/state';
+const STATE_API = '/state';
 const ADMIN_TOKEN_KEY = 'elo-arena-admin-token';
 const TABS = [
   {id:'queue', label:'Kolejka'},

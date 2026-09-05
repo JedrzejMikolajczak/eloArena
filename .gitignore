@@ -1,5 +1,6 @@
 node_modules/
 .netlify/
+.wrangler/
 .env
 .env.*
 !.env.example
