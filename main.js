@@ -217,11 +217,7 @@ function cancelResolveFlow(){
 function confirmResolve(){
   if(!resolveFlow) return;
   const winner = resolveFlow.winner;
-  if(!resolveFlow.mvpId || !resolveFlow.aceId){
-    alert('Wybierz MVP z wygranej drużyny i ACE z przegranej.');
-    return;
-  }
-  if(resolveFlow.mvpId === resolveFlow.aceId) return;
+  if(resolveFlow.mvpId && resolveFlow.mvpId === resolveFlow.aceId) return;
   const mvpId = resolveFlow.mvpId;
   const aceId = resolveFlow.aceId;
   resolveFlow = null;
