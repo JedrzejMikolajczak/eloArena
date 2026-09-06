@@ -260,14 +260,21 @@ function bestSplit(ids){
   return best;
 }
 
-function shufflePositions(ids){
+function getPreviousPositions(){
   const previousMatch = state.matches[0];
   const previousPositions = new Map();
-  if(previousMatch){
+  if(previousMatch?.positions){
+    Object.entries(previousMatch.positions).forEach(([id, position]) => {
+      previousPositions.set(id, position);
+    });
+  }else if(previousMatch){
     previousMatch.teamA.forEach((id, position) => previousPositions.set(id, position));
     previousMatch.teamB.forEach((id, position) => previousPositions.set(id, position));
   }
+  return previousPositions;
+}
 
+function shufflePositions(ids, previousPositions){
   let bestOrder = [...ids];
   let bestRepeats = Infinity;
   const visit = (remaining, order) => {
@@ -290,6 +297,14 @@ function shufflePositions(ids){
   };
   visit([...ids], []);
   return bestOrder;
+}
+
+function shuffleTeamsPositions(teamA, teamB){
+  const previousPositions = getPreviousPositions();
+  return {
+    teamA: shufflePositions(teamA, previousPositions),
+    teamB: shufflePositions(teamB, previousPositions)
+  };
 }
 
 // ---------- actions ----------
@@ -347,10 +362,11 @@ function joinQueue(playerId){
   state.queue.push(playerId);
   if(state.queue.length === 10){
     const split = bestSplit(state.queue);
+    const teams = shuffleTeamsPositions(split.teamA, split.teamB);
 
     state.pending = {
-      teamA: shufflePositions(split.teamA),
-      teamB: shufflePositions(split.teamB),
+      teamA: teams.teamA,
+      teamB: teams.teamB,
       avgA: Math.round(split.avgA),
       avgB: Math.round(split.avgB),
       createdAt: Date.now()
@@ -422,6 +438,9 @@ function resolveMatch(winner, mvpId, aceId){
   };
   applyTeam(teamA, deltaA, winner === 'A');
   applyTeam(teamB, deltaB, winner === 'B');
+  const positions = {};
+  teamA.forEach((id, position) => { positions[id] = position; });
+  teamB.forEach((id, position) => { positions[id] = position; });
 
   state.matches.unshift({
     id: uid(),
@@ -432,6 +451,7 @@ function resolveMatch(winner, mvpId, aceId){
     winner, deltaA, deltaB,
     playerDeltas,
     playerSnapshots,
+    positions,
     mvpId,
     aceId
   });
