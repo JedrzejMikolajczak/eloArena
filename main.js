@@ -425,7 +425,7 @@ function resolveMatch(winner, mvpId, aceId){
   applyTeam(teamB, deltaB, winner === 'B');
 
   state.matches.unshift({
-    id: matchId || uid(),
+    id: uid(),
     date: Date.now(),
     teamA: [...teamA],
     teamB: [...teamB],
