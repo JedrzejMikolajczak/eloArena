@@ -265,31 +265,34 @@ function bestSplit(ids){
 }
 
 function shufflePositions(ids){
-  const history = new Map();
-  state.matches.forEach(match => {
-    [...match.teamA, ...match.teamB].forEach((id, position) => {
-      if(!history.has(id)) history.set(id, new Set());
-      history.get(id).add(position % 5);
-    });
-  });
+  const previousMatch = state.matches[0];
+  const previousPositions = new Map();
+  if(previousMatch){
+    previousMatch.teamA.forEach((id, position) => previousPositions.set(id, position));
+    previousMatch.teamB.forEach((id, position) => previousPositions.set(id, position));
+  }
 
   let bestOrder = [...ids];
   let bestRepeats = Infinity;
-  for(let attempt = 0; attempt < 200; attempt++){
-    const order = [...ids];
-    for(let index = order.length - 1; index > 0; index--){
-      const swapIndex = Math.floor(Math.random() * (index + 1));
-      [order[index], order[swapIndex]] = [order[swapIndex], order[index]];
+  const visit = (remaining, order) => {
+    if(remaining.length === 0){
+      const repeats = order.reduce((count, id, position) => {
+        return count + (previousPositions.get(id) === position ? 1 : 0);
+      }, 0);
+      if(repeats < bestRepeats || (repeats === bestRepeats && Math.random() < 0.5)){
+        bestOrder = [...order];
+        bestRepeats = repeats;
+      }
+      return;
     }
-    const repeats = order.reduce((count, id, position) => {
-      return count + (history.get(id)?.has(position) ? 1 : 0);
-    }, 0);
-    if(repeats < bestRepeats){
-      bestOrder = order;
-      bestRepeats = repeats;
-    }
-    if(repeats === 0) break;
-  }
+    remaining.forEach((id, index) => {
+      visit(
+        [...remaining.slice(0, index), ...remaining.slice(index + 1)],
+        [...order, id]
+      );
+    });
+  };
+  visit([...ids], []);
   return bestOrder;
 }
 
