@@ -275,16 +275,18 @@ function getPreviousPositions(){
 }
 
 function shufflePositions(ids, previousPositions){
-  let bestOrder = [...ids];
+  let bestCandidates = [[...ids]];
   let bestRepeats = Infinity;
   const visit = (remaining, order) => {
     if(remaining.length === 0){
       const repeats = order.reduce((count, id, position) => {
         return count + (previousPositions.get(id) === position ? 1 : 0);
       }, 0);
-      if(repeats < bestRepeats || (repeats === bestRepeats && Math.random() < 0.5)){
-        bestOrder = [...order];
+      if(repeats < bestRepeats){
         bestRepeats = repeats;
+        bestCandidates = [order];
+      }else if(repeats === bestRepeats){
+        bestCandidates.push(order);
       }
       return;
     }
@@ -296,7 +298,7 @@ function shufflePositions(ids, previousPositions){
     });
   };
   visit([...ids], []);
-  return bestOrder;
+  return bestCandidates[Math.floor(Math.random() * bestCandidates.length)];
 }
 
 function shuffleTeamsPositions(teamA, teamB){
